@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   analyzeScene,
   analyzeSinger,
+  buildOcclusionGraph,
   evaluateUnblockPosition,
   findUnblockCandidates,
+  occlusionChainFrom,
   stageInterior,
   validateScene,
   TANGENT_EPS,
@@ -300,4 +302,142 @@ test('自动解遮挡：未知演唱者 id → error', () => {
   const r = findUnblockCandidates(sc, 'nope');
   assert.equal(r.candidates.length, 0);
   assert.ok(r.error && r.error.includes('未找到'));
+});
+
+// ---------------------------------------------------------------------------
+// 遮挡关系图谱：有向图构建、可达链路与循环检测
+// ---------------------------------------------------------------------------
+
+test('图谱：边指向最近遮挡者，通畅/相切节点无出边', () => {
+  // 指挥 (0,0)；a 通畅；b 被 a 挡；c 同时被 a、b 挡但 b 更近；
+  // d 的视线与 g 的圆恰好相切（d→指挥线段 4x-3y=0，g 圆心距 0.6 = 半径）
+  const a = singer('a', 0, 2, 0.3);
+  const b = singer('b', 0, 4, 0.3);
+  const c = singer('c', 0, 6, 0.3);
+  const d = singer('d', 3, 4, 0.3);
+  const g0 = singer('g', 0.9, 2.2, 0.6);
+  const analysis = analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [a, b, c, d, g0] }));
+  // 前置校验：各节点状态符合预期
+  const statusOf = (id: string) => analysis.results.find((r) => r.singerId === id)?.status;
+  assert.equal(statusOf('a'), 'clear');
+  assert.equal(statusOf('b'), 'blocked');
+  assert.equal(statusOf('c'), 'blocked');
+  assert.equal(statusOf('d'), 'tangent');
+  assert.equal(statusOf('g'), 'clear');
+
+  const g = buildOcclusionGraph(analysis);
+  assert.equal(g.nodes.length, 5);
+  assert.deepEqual(
+    g.edges.map((ed) => [ed.from, ed.to]),
+    [
+      ['b', 'a'],
+      ['c', 'b'], // c 的最近遮挡者是 b（距眼睛 1.7 m），不是 a（3.7 m）
+    ],
+  );
+  assert.deepEqual(g.cycles, []);
+
+  // 链路：c → b → a（终止于通畅节点）
+  const chainC = occlusionChainFrom(g, 'c');
+  assert.deepEqual(chainC.nodes, ['c', 'b', 'a']);
+  assert.deepEqual(chainC.edges, [
+    ['c', 'b'],
+    ['b', 'a'],
+  ]);
+  assert.equal(chainC.cycle, undefined);
+
+  // 通畅 / 相切节点都是链的终点（无出边）
+  for (const id of ['a', 'd', 'g']) {
+    const chain = occlusionChainFrom(g, id);
+    assert.deepEqual(chain.nodes, [id]);
+    assert.deepEqual(chain.edges, []);
+  }
+  // 未知起点 → 空链路
+  assert.deepEqual(occlusionChainFrom(g, 'nope'), { nodes: [], edges: [] });
+});
+
+test('图谱：退化节点（与指挥重合）无出边', () => {
+  const e = singer('e', 0, 0, 0.3); // 与指挥重合 → 视线退化
+  const analysis = analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [e] }));
+  assert.equal(analysis.results[0].status, 'degenerate');
+  const g = buildOcclusionGraph(analysis);
+  assert.equal(g.nodes.length, 1);
+  assert.equal(g.nodes[0].status, 'degenerate');
+  assert.deepEqual(g.edges, []);
+  assert.deepEqual(g.cycles, []);
+  assert.deepEqual(occlusionChainFrom(g, 'e'), { nodes: ['e'], edges: [], cycle: undefined });
+});
+
+test('图谱：互相遮挡的两圆形成循环，链路标出循环部分', () => {
+  // a(0,4) r=1 与 b(0.5,3.5) r=1 互相包含对方眼睛 → 互挡循环
+  const a = singer('a', 0, 4, 1);
+  const b = singer('b', 0.5, 3.5, 1);
+  const analysis = analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [a, b] }));
+  const g = buildOcclusionGraph(analysis);
+
+  assert.deepEqual(
+    g.edges.map((e) => [e.from, e.to]).sort(),
+    [
+      ['a', 'b'],
+      ['b', 'a'],
+    ],
+  );
+  assert.deepEqual(g.cycles, [['a', 'b']]); // 规范化：从最小 id 开始
+
+  const chainA = occlusionChainFrom(g, 'a');
+  assert.deepEqual(chainA.nodes, ['a', 'b']);
+  assert.deepEqual(chainA.edges, [
+    ['a', 'b'],
+    ['b', 'a'], // 含回到循环起点的闭合边
+  ]);
+  assert.deepEqual(chainA.cycle, ['a', 'b']);
+
+  const chainB = occlusionChainFrom(g, 'b');
+  assert.deepEqual(chainB.nodes, ['b', 'a']);
+  assert.deepEqual(chainB.cycle, ['b', 'a']); // 链路循环从再次到达的节点开始，不做规范化
+});
+
+test('图谱：链路经过他人进入循环（A→C→B→C）', () => {
+  // b(0,2) r=0.5 与 c(0.3,2.3) r=0.5 互挡成环；a(0,4) 的最近遮挡者是 c
+  const a = singer('a', 0, 4, 0.3);
+  const b = singer('b', 0, 2, 0.5);
+  const c = singer('c', 0.3, 2.3, 0.5);
+  const analysis = analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [a, b, c] }));
+  const g = buildOcclusionGraph(analysis);
+
+  assert.deepEqual(
+    g.edges.map((e) => [e.from, e.to]).sort(),
+    [
+      ['a', 'c'],
+      ['b', 'c'],
+      ['c', 'b'],
+    ],
+  );
+  assert.deepEqual(g.cycles, [['b', 'c']]);
+
+  const chain = occlusionChainFrom(g, 'a');
+  assert.deepEqual(chain.nodes, ['a', 'c', 'b']);
+  assert.deepEqual(chain.edges, [
+    ['a', 'c'],
+    ['c', 'b'],
+    ['b', 'c'],
+  ]);
+  assert.deepEqual(chain.cycle, ['c', 'b']);
+});
+
+test('图谱：圆心重合的站位互挡成环，且与无关循环各自独立', () => {
+  // d、e 圆心重合互挡；f、g 圆心重合互挡；h 通畅
+  const d = singer('d', 3, 3, 0.3);
+  const e = singer('e', 3, 3, 0.35);
+  const f = singer('f', 8, 3, 0.3);
+  const g2 = singer('g', 8, 3, 0.3);
+  const h = singer('h', 5, 6, 0.3);
+  const analysis = analyzeScene(scene({ conductor: { x: 6, y: 0 }, singers: [d, e, f, g2, h] }));
+  const g = buildOcclusionGraph(analysis);
+
+  assert.deepEqual(g.cycles, [
+    ['d', 'e'],
+    ['f', 'g'],
+  ]);
+  // h 的视线不被任何人遮挡 → 无出边
+  assert.ok(!g.edges.some((e2) => e2.from === 'h'));
 });

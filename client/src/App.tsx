@@ -11,6 +11,7 @@ import {
 import { PRESETS, defaultScene } from './presets';
 import { Stage, CONDUCTOR_ID } from './Stage';
 import { Sidebar } from './Sidebar';
+import { GraphView } from './GraphView';
 import type { UnblockState } from './UnblockPanel';
 
 interface Notice {
@@ -274,21 +275,24 @@ export default function App() {
 
       <main className="main">
         <div className="stage-wrap">
-          <Stage
-            scene={scene}
-            analysis={analysis}
-            selectedId={selectedId}
-            preview={preview}
-            onSelect={selectId}
-            onMoveSinger={moveSinger}
-            onMoveConductor={moveConductor}
-            onAddSingerAt={addSingerAt}
-            onRadiusChange={changeRadius}
-            onPreviewCandidate={previewUnblock}
-          />
-          {selectedId === CONDUCTOR_ID && (
-            <div className="conductor-hint">已选中指挥：拖动调整位置，点击空白处取消选择。</div>
-          )}
+          <div className="stage-main">
+            <Stage
+              scene={scene}
+              analysis={analysis}
+              selectedId={selectedId}
+              preview={preview}
+              onSelect={selectId}
+              onMoveSinger={moveSinger}
+              onMoveConductor={moveConductor}
+              onAddSingerAt={addSingerAt}
+              onRadiusChange={changeRadius}
+              onPreviewCandidate={previewUnblock}
+            />
+            {selectedId === CONDUCTOR_ID && (
+              <div className="conductor-hint">已选中指挥：拖动调整位置，点击空白处取消选择。</div>
+            )}
+          </div>
+          <GraphView scene={scene} analysis={analysis} selectedId={selectedId} onSelect={selectId} />
         </div>
         <Sidebar
           scene={scene}
