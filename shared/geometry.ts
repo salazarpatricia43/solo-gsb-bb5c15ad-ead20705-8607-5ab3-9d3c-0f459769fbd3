@@ -184,6 +184,112 @@ export function analyzeScene(scene: Scene): Analysis {
 }
 
 // ---------------------------------------------------------------------------
+// 遮挡关系图谱：演唱者 → 其最近遮挡者 的有向图
+//
+// 由 Analysis 直接推导（纯函数）：
+//  - 节点：每位演唱者，附带其视线状态（clear / tangent / blocked / degenerate）；
+//  - 边：仅状态为 blocked 的演唱者有一条出边，指向其沿视线最近的遮挡者
+//    （即 SingerLOS.nearest），因此每个节点出度 ≤ 1（functional graph）；
+//  - 循环：沿出边不断跟进若回到已访问节点即构成有向环（互相遮挡链），
+//    例如 A 被 B 遮挡、B 又被 A 遮挡（圆心重合时常见）。
+// ---------------------------------------------------------------------------
+
+export interface OcclusionGraphNode {
+  id: string;
+  name: string;
+  status: LOSStatus;
+}
+
+export interface OcclusionGraphEdge {
+  /** 被遮挡的演唱者 id */
+  from: string;
+  /** 其沿视线最近的遮挡者 id */
+  to: string;
+}
+
+export interface OcclusionGraph {
+  nodes: OcclusionGraphNode[];
+  edges: OcclusionGraphEdge[];
+  /** 全部有向环；每个环按边的方向给出节点 id（末节点的出边连回首节点） */
+  cycles: string[][];
+}
+
+/** 由分析结果构建遮挡关系图谱。 */
+export function buildOcclusionGraph(analysis: Analysis): OcclusionGraph {
+  const nodes: OcclusionGraphNode[] = analysis.results.map((r) => ({
+    id: r.singerId,
+    name: r.singerName,
+    status: r.status,
+  }));
+  const edges: OcclusionGraphEdge[] = [];
+  for (const r of analysis.results) {
+    if (r.status === 'blocked' && r.nearest) {
+      edges.push({ from: r.singerId, to: r.nearest.blockerId });
+    }
+  }
+
+  // 每个节点至多一条出边：from → to
+  const next = new Map<string, string>();
+  for (const e of edges) next.set(e.from, e.to);
+
+  // 循环检测：从每个未访问节点沿链走，记录链上下标；再次遇到链上节点即发现一个环
+  const cycles: string[][] = [];
+  const visited = new Set<string>();
+  for (const node of nodes) {
+    if (visited.has(node.id)) continue;
+    const path: string[] = [];
+    const pos = new Map<string, number>();
+    let cur: string | undefined = node.id;
+    while (cur !== undefined) {
+      const at = pos.get(cur);
+      if (at !== undefined) {
+        cycles.push(path.slice(at));
+        break;
+      }
+      if (visited.has(cur)) break;
+      pos.set(cur, path.length);
+      path.push(cur);
+      cur = next.get(cur);
+    }
+    for (const id of path) visited.add(id);
+  }
+
+  return { nodes, edges, cycles };
+}
+
+export interface GraphReachability {
+  /** 可达节点 id 集合（含起点自身） */
+  nodes: Set<string>;
+  /** 可达链路经过的边（沿遮挡方向有序） */
+  edges: OcclusionGraphEdge[];
+}
+
+/**
+ * 从 startId 出发沿“最近遮挡者”边可达的节点与边（即该演唱者的遮挡链路）。
+ * 链路在进入环时终止（环节点只记录一次）；起点不在图中时返回空结果。
+ */
+export function reachableBlockers(graph: OcclusionGraph, startId: string): GraphReachability {
+  const nodes = new Set<string>();
+  const edges: OcclusionGraphEdge[] = [];
+  if (!graph.nodes.some((n) => n.id === startId)) return { nodes, edges };
+
+  const next = new Map<string, string>();
+  for (const e of graph.edges) next.set(e.from, e.to);
+
+  nodes.add(startId);
+  let cur = startId;
+  for (;;) {
+    const to = next.get(cur);
+    if (to === undefined) break;
+    edges.push({ from: cur, to });
+    if (nodes.has(to)) break; // 已进入环，环节点已在集合中
+    nodes.add(to);
+    cur = to;
+  }
+  return { nodes, edges };
+}
+
+// ---------------------------------------------------------------------------
 // 自动解遮挡：网格采样 + 细化搜索
 //
 // 只移动“被选中的演唱者”一人，寻找位移最小的可行新位置。可行位置必须同时满足：

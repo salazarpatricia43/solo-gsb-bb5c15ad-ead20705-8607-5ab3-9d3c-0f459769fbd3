@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   analyzeScene,
   analyzeSinger,
+  buildOcclusionGraph,
   evaluateUnblockPosition,
   findUnblockCandidates,
+  reachableBlockers,
   stageInterior,
   validateScene,
   TANGENT_EPS,
@@ -300,4 +302,106 @@ test('自动解遮挡：未知演唱者 id → error', () => {
   const r = findUnblockCandidates(sc, 'nope');
   assert.equal(r.candidates.length, 0);
   assert.ok(r.error && r.error.includes('未找到'));
+});
+
+// ---------------------------------------------------------------------------
+// 遮挡 关系图谱：演唱者 → 最近遮挡者 的有向图
+// ---------------------------------------------------------------------------
+
+test('遮挡图谱：边指向最近遮挡者，通畅节点无出边', () => {
+  const sc = scene({
+    conductor: { x: 0, y: 0 },
+    singers: [
+      singer('a', 0, 6), // 被 b 遮挡
+      singer('b', 0, 4), // 被 c 遮挡
+      singer('c', 0, 2), // 通畅
+      singer('t', 6, 6), // 通畅，与链路无关
+    ],
+  });
+  const g = buildOcclusionGraph(analyzeScene(sc));
+  assert.equal(g.nodes.length, 4);
+  const fromA = g.edges.filter((e) => e.from === 'a');
+  assert.deepEqual(fromA, [{ from: 'a', to: 'b' }]);
+  const fromB = g.edges.filter((e) => e.from === 'b');
+  assert.deepEqual(fromB, [{ from: 'b', to: 'c' }]);
+  // c 与 t 通畅、无出边
+  assert.equal(g.edges.filter((e) => e.from === 'c').length, 0);
+  assert.equal(g.edges.filter((e) => e.from === 't').length, 0);
+  assert.equal(g.cycles.length, 0);
+  // 节点状态与分析一致
+  const statusOf = (id: string) => g.nodes.find((n) => n.id === id)?.status;
+  assert.equal(statusOf('a'), 'blocked');
+  assert.equal(statusOf('c'), 'clear');
+});
+
+test('遮挡图谱：相切与退化节点不产生出边', () => {
+  // 相切：me 的视线与 grazer 恰好相切（擦边不判遮挡）
+  const me = singer('me', 0, 4);
+  const grazer = singer('g', 1, 2, 1);
+  const g1 = buildOcclusionGraph(
+    analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [me, grazer] })),
+  );
+  assert.equal(g1.nodes.find((n) => n.id === 'me')?.status, 'tangent');
+  assert.equal(g1.edges.length, 0);
+  assert.equal(g1.cycles.length, 0);
+  // 退化：d 与指挥重合，视线退化为点
+  const d = singer('d', 0, 0);
+  const g2 = buildOcclusionGraph(analyzeScene(scene({ conductor: { x: 0, y: 0 }, singers: [d] })));
+  assert.equal(g2.nodes.find((n) => n.id === 'd')?.status, 'degenerate');
+  assert.equal(g2.edges.length, 0);
+  assert.equal(g2.cycles.length, 0);
+});
+
+test('遮挡图谱：互相遮挡形成循环（圆心重合的两人）', () => {
+  const sc = scene({
+    conductor: { x: 0, y: 0 },
+    singers: [singer('a', 0, 4), singer('b', 0, 4)], // 圆心重合 → 互相遮挡
+  });
+  const g = buildOcclusionGraph(analyzeScene(sc));
+  assert.deepEqual(
+    g.edges.map((e) => `${e.from}->${e.to}`).sort(),
+    ['a->b', 'b->a'],
+  );
+  assert.equal(g.cycles.length, 1);
+  assert.deepEqual([...g.cycles[0]].sort(), ['a', 'b']);
+});
+
+test('遮挡图谱：可达链路沿最近遮挡者延伸并在终点/环处终止', () => {
+  const sc = scene({
+    conductor: { x: 0, y: 0 },
+    singers: [singer('a', 0, 6), singer('b', 0, 4), singer('c', 0, 2), singer('x', 5, 5)],
+  });
+  const g = buildOcclusionGraph(analyzeScene(sc));
+  // 链式：a → b → c（c 通畅，链路终止）
+  const ra = reachableBlockers(g, 'a');
+  assert.deepEqual([...ra.nodes].sort(), ['a', 'b', 'c']);
+  assert.deepEqual(
+    ra.edges.map((e) => `${e.from}->${e.to}`),
+    ['a->b', 'b->c'],
+  );
+  // 链路不含无关节点 x
+  assert.equal(ra.nodes.has('x'), false);
+  // 从链路末端出发：只有自己
+  const rc = reachableBlockers(g, 'c');
+  assert.deepEqual([...rc.nodes], ['c']);
+  assert.equal(rc.edges.length, 0);
+  // 未知 id：空结果
+  const rn = reachableBlockers(g, 'nope');
+  assert.equal(rn.nodes.size, 0);
+  assert.equal(rn.edges.length, 0);
+});
+
+test('遮挡图谱：可达链路进入循环时终止且不重复节点', () => {
+  // a↔b 互相遮挡（重合），c 被 a 遮挡 → c → a → b →（回到 a，终止）
+  const sc = scene({
+    conductor: { x: 0, y: 0 },
+    singers: [singer('a', 0, 4), singer('b', 0, 4), singer('c', 0, 6)],
+  });
+  const g = buildOcclusionGraph(analyzeScene(sc));
+  assert.equal(g.cycles.length, 1);
+  const rc = reachableBlockers(g, 'c');
+  assert.deepEqual([...rc.nodes].sort(), ['a', 'b', 'c']);
+  // 边：c->a, a->b, b->a（入环的最后一条边记录一次后终止）
+  assert.equal(rc.edges.length, 3);
+  assert.equal(rc.edges[0].from, 'c');
 });

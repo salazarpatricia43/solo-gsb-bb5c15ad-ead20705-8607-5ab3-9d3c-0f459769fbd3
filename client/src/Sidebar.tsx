@@ -1,5 +1,6 @@
 import type { Analysis, Scene, SingerLOS, UnblockCandidate } from '../../shared/geometry';
 import { identityColor } from './colors';
+import { GraphView } from './GraphView';
 import { CONDUCTOR_ID } from './Stage';
 import { UnblockPanel, type UnblockState } from './UnblockPanel';
 
@@ -63,6 +64,13 @@ export function Sidebar(props: SidebarProps) {
           </ul>
         </section>
       )}
+
+      <GraphView
+        scene={scene}
+        analysis={analysis}
+        selectedId={selectedId}
+        onSelect={props.onSelect}
+      />
 
       <section className="panel">
         <h3>选中对象</h3>
